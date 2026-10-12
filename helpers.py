@@ -73,8 +73,8 @@ class PagedEmbed(discord.ui.View):
 
 
 async def send_paged(interaction: discord.Interaction, title: str, text: str):
-    chunks = split_text(text) or ["(내용이 비어 있어요)"]
-    view = PagedEmbed(title, chunks)
+    chunks = split_text(text) or ["내용 없음"]
+    view = PagedEmbed(title[:250], chunks)
     if len(chunks) == 1:
         await interaction.followup.send(embed=view.embed())
         return

@@ -1,7 +1,9 @@
-"""노션 세계관 페이지(페이지 구조 그대로)를 읽어 오는 모듈.
+"""노션 세계관 페이지를 읽어 오는 모듈.
 
-루트 페이지의 하위 문서(child_page / 페이지 링크 / 페이지 멘션)를 모아
-제목 → 본문 텍스트로 캐싱한다.
+루트 페이지 아래의 문서와 그 하위 페이지를 끝까지(단계 제한 내에서) 따라 내려가 읽는다.
+- 모든 페이지는 '상위 / 하위' 경로 이름으로 따로 조회할 수 있다.
+- 한 페이지를 보여줄 때는 그 아래 하위 페이지의 내용도 본문 순서대로 함께 보여준다.
+- 내용이 없는 페이지는 '내용 없음'으로 표시한다.
 """
 import asyncio
 import logging
@@ -13,15 +15,30 @@ from notion_client import AsyncClient
 from notion_client.errors import APIResponseError
 from notion_client.helpers import async_collect_paginated_api
 
-CACHE_TTL = 300  # 초. 노션 수정 내용이 최대 5분 뒤 반영돼요.
-MAX_DEPTH = 3    # 토글/들여쓰기 하위 블록을 읽는 깊이
+CACHE_TTL = 300        # 초. 노션 수정 내용이 최대 5분 뒤 반영돼요.
+MAX_DEPTH = 3          # 토글·들여쓰기 같은 하위 블록을 읽는 깊이
+MAX_PAGE_DEPTH = 6     # 페이지 안의 페이지를 따라 내려가는 최대 단계
+MAX_PAGES = 300        # 한 번에 읽을 최대 문서 수 (노션 요청 제한과 대기 시간 보호)
+EMPTY = "내용 없음"
+CHILD_MARK = "\x00child:"   # 본문 속 하위 페이지 자리를 나타내는 내부 표식
 
 
 @dataclass
 class LorePage:
     id: str
-    title: str
-    text: str
+    title: str      # 이 페이지의 이름
+    path: str       # '상위 / 하위' 형태의 전체 이름. 최상위 문서는 title과 같다.
+    depth: int      # 0 = 최상위 문서
+    raw: str        # 본문. 하위 페이지 자리는 내부 표식으로 남겨 둔다.
+
+
+@dataclass
+class _Ctx:
+    path: str
+    level: int
+    registry: dict
+    budget: list
+    descend: bool = True   # False면 하위 페이지를 읽지 않고 이름만 적는다(루트 본문용)
 
 
 def _rich(rich_text: list) -> str:
@@ -39,6 +56,19 @@ def _norm(page_id: str) -> str:
     return page_id.replace("-", "").lower()
 
 
+def _unique(taken, path: str) -> str:
+    if path not in taken:
+        return path
+    n = 2
+    while f"{path} ({n})" in taken:
+        n += 1
+    return f"{path} ({n})"
+
+
+def _clean(lines: list[str]) -> str:
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 class NotionLore:
     def __init__(self, token: str, root_page_id: str, include_root: bool = True):
         self.client = AsyncClient(auth=token)
@@ -46,11 +76,13 @@ class NotionLore:
         # True면 루트 페이지 본문도 하나의 문서로 취급 (캐릭터 목록 페이지는 False)
         self.include_root = include_root
         self._pages: dict[str, LorePage] = {}
+        self._by_id: dict[str, str] = {}
         self._loaded_at = 0.0
         self._lock = asyncio.Lock()
         # 노션 API는 평균 초당 3회 제한이라 동시 요청과 간격을 제한한다.
         self._sem = asyncio.Semaphore(2)
 
+    # ---------------- 노션 호출 ----------------
     async def _call(self, func, *args, **kwargs):
         for attempt in range(4):
             try:
@@ -71,7 +103,27 @@ class NotionLore:
             block_id=block_id,
         )
 
-    async def _blocks_to_lines(self, block_id: str, depth: int = 0) -> list[str]:
+    # ---------------- 읽기 ----------------
+    async def _child_page(self, b: dict, ctx: _Ctx) -> str:
+        """하위 페이지를 읽어 registry에 등록하고, 본문에 끼울 표식 줄을 돌려준다."""
+        title = b["child_page"].get("title") or "(제목 없음)"
+        if not ctx.descend:
+            return f"📄 {title}"
+        if ctx.level + 1 > MAX_PAGE_DEPTH or ctx.budget[0] <= 0:
+            return f"📄 {title} (더 내려가지 않음)"
+        ctx.budget[0] -= 1
+        path = _unique(ctx.registry, f"{ctx.path} / {title}")
+        ctx.registry[path] = None  # 트리 순서를 지키기 위해 자리를 먼저 예약
+        try:
+            lines = await self._blocks_to_lines(b["id"], 0, _Ctx(path, ctx.level + 1, ctx.registry, ctx.budget))
+        except Exception as exc:  # 한 페이지를 못 읽어도 나머지는 계속 보여준다.
+            logging.warning("하위 페이지를 읽지 못했어요: %s (%r)", path, exc)
+            ctx.registry.pop(path, None)
+            return f"📄 {title} (읽지 못함)"
+        ctx.registry[path] = LorePage(b["id"], title, path, ctx.level + 1, _clean(lines))
+        return CHILD_MARK + path
+
+    async def _blocks_to_lines(self, block_id: str, depth: int, ctx: _Ctx) -> list[str]:
         lines: list[str] = []
         number = 0
         for b in await self._children(block_id):
@@ -100,17 +152,13 @@ class NotionLore:
             elif t == "table_row":
                 lines.append(" | ".join(_rich(c) for c in data.get("cells", [])))
             elif t == "child_page":
-                lines.append(f"📄 {data.get('title', '')}")
+                lines.append(await self._child_page(b, ctx))
             elif t in ("paragraph", "toggle"):
                 lines.append(f"{pad}{text}")
 
             if b.get("has_children") and t != "child_page" and depth < MAX_DEPTH:
-                lines += await self._blocks_to_lines(b["id"], depth + 1)
+                lines += await self._blocks_to_lines(b["id"], depth + 1, ctx)
         return lines
-
-    @staticmethod
-    def _clean(lines: list[str]) -> str:
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
     async def refresh(self, force: bool = False):
         async with self._lock:
@@ -121,7 +169,7 @@ class NotionLore:
             root = await self._call(self.client.pages.retrieve, page_id=self.root_id)
             root_key = _norm(self.root_id)
 
-            # 루트의 하위 문서 후보 수집: id -> 제목(없으면 None)
+            # 1단계: 최상위 문서 후보를 모은다. id -> 제목(없으면 None)
             targets: dict[str, str | None] = {}
             for b in await self._children(self.root_id):
                 t = b["type"]
@@ -136,28 +184,47 @@ class NotionLore:
                         targets[m["page"]["id"]] = r.get("plain_text") or None
             targets = {k: v for k, v in targets.items() if _norm(k) != root_key}
 
-            async def load(pid: str, title: str | None) -> LorePage:
-                if not title:
-                    page = await self._call(self.client.pages.retrieve, page_id=pid)
-                    title = _page_title(page)
-                lines = await self._blocks_to_lines(pid)
-                return LorePage(pid, title, self._clean(lines))
-
-            jobs = [load(pid, title) for pid, title in targets.items()]
+            # 2단계: 최상위 문서의 이름(경로)을 겹치지 않게 정한다.
+            tops: list[tuple[str, str, bool]] = []   # (id, path, 하위 페이지를 읽을지)
+            taken: set[str] = set()
             if self.include_root:
-                jobs.insert(0, load(self.root_id, _page_title(root)))
-            results = await asyncio.gather(*jobs, return_exceptions=True)
+                path = _unique(taken, _page_title(root))
+                taken.add(path)
+                tops.append((self.root_id, path, False))
+            for pid, title in targets.items():
+                if not title:
+                    title = _page_title(await self._call(self.client.pages.retrieve, page_id=pid))
+                path = _unique(taken, title)
+                taken.add(path)
+                tops.append((pid, path, True))
+
+            # 3단계: 문서마다 하위 페이지까지 읽는다. 문서끼리는 동시에, 문서 안에서는 차례로.
+            budget = [MAX_PAGES]
+
+            async def load(pid: str, path: str, descend: bool) -> dict[str, LorePage]:
+                if budget[0] <= 0:
+                    raise RuntimeError("문서 수 제한")
+                budget[0] -= 1
+                registry: dict[str, LorePage] = {}
+                lines = await self._blocks_to_lines(pid, 0, _Ctx(path, 0, registry, budget, descend))
+                top = LorePage(pid, path, path, 0, _clean(lines))
+                return {path: top, **registry}
+
+            results = await asyncio.gather(*(load(*t) for t in tops), return_exceptions=True)
             pages: dict[str, LorePage] = {}
-            for r in results:
-                if isinstance(r, LorePage):
-                    pages[r.title] = r
+            for result in results:
+                if isinstance(result, dict):
+                    pages.update(result)
                 else:
-                    logging.warning("문서 하나를 불러오지 못했어요: %r", r)
+                    logging.warning("문서 하나를 불러오지 못했어요: %r", result)
+            if budget[0] <= 0:
+                logging.warning("문서 수 제한(%d개)에 도달해 일부 하위 페이지를 읽지 않았어요.", MAX_PAGES)
 
             self._pages = pages
+            self._by_id = {_norm(p.id): path for path, p in pages.items()}
             self._loaded_at = time.time()
 
-    # ---- 쓰기 ----
+    # ---------------- 쓰기 ----------------
     @staticmethod
     def _paragraphs(body: str) -> list[dict]:
         """본문을 노션 문단 블록으로 변환 (텍스트 1개당 2000자 제한 때문에 1900자씩 자름)."""
@@ -187,36 +254,85 @@ class NotionLore:
         await self.refresh(force=True)
         return page
 
-    # ---- 캐시 조회 (네트워크 사용 안 함) ----
+    # ---------------- 캐시 조회 (네트워크 사용 안 함) ----------------
     def titles(self) -> list[str]:
+        """모든 문서의 경로 이름. 상위 문서 바로 뒤에 그 하위 문서가 온다."""
         return list(self._pages)
 
+    def top_titles(self) -> list[str]:
+        return [p.path for p in self._pages.values() if p.depth == 0]
+
+    def tree_lines(self) -> list[str]:
+        lines = []
+        for page in self._pages.values():
+            lines.append(f"• {page.title}" if page.depth == 0 else f"{'　' * (page.depth - 1)}└ {page.title}")
+        return lines
+
+    def render(self, page: LorePage, level: int = 0) -> str:
+        """페이지 본문에 하위 페이지의 내용을 순서대로 끼워 넣은 표시용 글. 비어 있으면 '내용 없음'."""
+        lines: list[str] = []
+        for line in page.raw.split("\n"):
+            if line.startswith(CHILD_MARK):
+                child = self._pages.get(line[len(CHILD_MARK):])
+                if child is None or level >= MAX_PAGE_DEPTH:
+                    continue
+                marker = "└" * level + (" " if level else "")
+                lines += ["", f"**{marker}📄 {child.title}**", self.render(child, level + 1)]
+            else:
+                lines.append(line)
+        return _clean(lines) or EMPTY
+
+    def own_text(self, page: LorePage) -> str:
+        """하위 페이지 내용을 뺀 이 페이지만의 본문(검색용)."""
+        return _clean([ln for ln in page.raw.split("\n") if not ln.startswith(CHILD_MARK)])
+
     def get(self, query: str) -> LorePage | None:
-        q = query.strip().lower()
-        if not q:
+        raw = query.strip()
+        if not raw:
             return None
-        for title, page in self._pages.items():
-            if title.lower() == q:
+        by_id = self._by_id.get(_norm(raw))
+        if by_id:
+            return self._pages[by_id]
+        q = raw.lower()
+        for path, page in self._pages.items():
+            if path.lower() == q:
                 return page
-        for title, page in self._pages.items():
-            if q in title.lower():
+        for path, page in self._pages.items():
+            if page.title.lower() == q:
+                return page
+        for path, page in self._pages.items():
+            if q in path.lower():
                 return page
         return None
 
+    def suggest(self, current: str, limit: int = 25) -> list[tuple[str, str]]:
+        """자동완성용 (표시 이름, 값). 값은 문서 id라서 이름이 길어도 정확히 찾아진다."""
+        cur = current.strip().lower()
+        starts, contains = [], []
+        for path, page in self._pages.items():
+            item = (path[:100], _norm(page.id))
+            if not cur or path.lower().startswith(cur) or page.title.lower().startswith(cur):
+                starts.append(item)
+            elif cur in path.lower():
+                contains.append(item)
+        return (starts + contains)[:limit]
+
     def search(self, keyword: str, limit: int = 10) -> list[tuple[LorePage, str, int]]:
+        """각 문서 자신의 본문에서만 찾는다. 하위 페이지의 내용은 그 하위 문서 항목으로 나온다."""
         k = keyword.strip().lower()
         if not k:
             return []
         results = []
         for page in self._pages.values():
-            low = page.text.lower()
+            own = self.own_text(page)
+            low = own.lower()
             count = low.count(k)
-            if count or k in page.title.lower():
+            if count or k in page.path.lower():
                 i = low.find(k)
                 if i >= 0:
-                    snippet = page.text[max(0, i - 40): i + len(k) + 60]
+                    snippet = own[max(0, i - 40): i + len(k) + 60]
                 else:
-                    snippet = page.text[:80]
+                    snippet = own[:80] or EMPTY
                 results.append((page, snippet.replace("\n", " "), count))
         results.sort(key=lambda r: -r[2])
         return results[:limit]

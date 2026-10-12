@@ -24,7 +24,7 @@ class Search(commands.Cog):
         blocks = []
         for page, snippet, count in results:
             label = f"{count}회" if count else "제목 일치"
-            blocks.append(f"**{page.title}** · {label}\n…{snippet}…")
+            blocks.append(f"**{page.label}** · {label}\n…{snippet}…")
         embed = discord.Embed(title=f"검색: {shown}", description="\n\n".join(blocks), color=COLOR)
         embed.set_footer(text="자세히 보려면 /설정 이름")
         await interaction.followup.send(embed=embed)

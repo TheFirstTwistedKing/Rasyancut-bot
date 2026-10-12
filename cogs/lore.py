@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helpers import COLOR, ensure_loaded, send_paged
+from helpers import ensure_loaded, send_paged
 
 
 class AddLoreModal(discord.ui.Modal, title="설정 추가"):
@@ -42,14 +42,9 @@ class Lore(commands.Cog):
         await interaction.response.defer()
         if not await ensure_loaded(interaction, self.bot.lore):
             return
-        names = self.bot.lore.titles()
-        embed = discord.Embed(
-            title="세계관 문서",
-            description="\n".join(f"• {n}" for n in names) or "문서가 없어요.",
-            color=COLOR,
-        )
-        embed.set_footer(text="읽으려면 /설정 이름")
-        await interaction.followup.send(embed=embed)
+        lines = self.bot.lore.tree_lines()
+        text = "\n".join(lines) + "\n\n읽으려면 /설정 이름" if lines else "문서가 없어요."
+        await send_paged(interaction, "세계관 문서", text)
 
     @app_commands.command(name="설정", description="세계관 문서를 읽어요")
     @app_commands.rename(name="이름")
@@ -62,16 +57,12 @@ class Lore(commands.Cog):
         if page is None:
             await interaction.followup.send(f"'{name[:50]}' 문서를 찾지 못했어요. `/목록`으로 확인해 보세요.")
             return
-        await send_paged(interaction, page.title, page.text)
+        await send_paged(interaction, page.label, self.bot.lore.render(page))
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):
-        cur = current.lower()
-        return [
-            app_commands.Choice(name=t[:100], value=t[:100])
-            for t in self.bot.lore.titles()
-            if cur in t.lower()
-        ][:25]
+        return [app_commands.Choice(name=name, value=value)
+                for name, value in self.bot.lore.suggest(current)]
 
     @app_commands.command(name="설정추가", description="새 세계관 문서를 노션에 추가해요 (서버 관리자)")
     @app_commands.rename(name="이름")

@@ -24,21 +24,17 @@ class Character(commands.Cog):
             return
         page = source.get(name)
         if page is None:
-            names = ", ".join(source.titles()[:15]) or "없음"
+            names = ", ".join(source.top_titles()[:15]) or "없음"
             await interaction.followup.send(f"'{name[:50]}' 캐릭터를 찾지 못했어요.\n등록된 캐릭터: {names}")
             return
-        await send_paged(interaction, page.title, page.text)
+        await send_paged(interaction, page.label, source.render(page))
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):
         if self.bot.characters is None:
             return []
-        cur = current.lower()
-        return [
-            app_commands.Choice(name=t[:100], value=t[:100])
-            for t in self.bot.characters.titles()
-            if cur in t.lower()
-        ][:25]
+        return [app_commands.Choice(name=name, value=value)
+                for name, value in self.bot.characters.suggest(current)]
 
 
 async def setup(bot: commands.Bot):

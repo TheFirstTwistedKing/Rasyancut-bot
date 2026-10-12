@@ -15,12 +15,13 @@ from notion_client import AsyncClient
 from notion_client.errors import APIResponseError
 from notion_client.helpers import async_collect_paginated_api
 
-VERSION = "2026-10-12 이름만 표시"   # 시작할 때 콘솔에 찍혀, 어떤 버전이 실행 중인지 확인할 수 있다.
+VERSION = "2026-10-12 이름만 표시 · 25개 초과 안내"   # 시작할 때 콘솔에 찍혀, 어떤 버전이 실행 중인지 확인할 수 있다.
 CACHE_TTL = 300        # 초. 노션 수정 내용이 최대 5분 뒤 반영돼요.
 MAX_DEPTH = 3          # 토글·들여쓰기 같은 하위 블록을 읽는 깊이
 MAX_PAGE_DEPTH = 6     # 페이지 안의 페이지를 따라 내려가는 최대 단계
 MAX_PAGES = 300        # 한 번에 읽을 최대 문서 수 (노션 요청 제한과 대기 시간 보호)
 EMPTY = "내용 없음"
+MORE_VALUE = "__more__"   # 자동완성 마지막 '더 있어요' 줄을 고르면 /설정이 받는 값
 CHILD_MARK = "\x00child:"   # 본문 속 하위 페이지 자리를 나타내는 내부 표식
 LIST_MARK = "\x00list:"     # 봇이 덧붙인 '하위 문서 이름' 줄. 화면에는 보이지만 검색 대상이 아니다.
 
@@ -330,10 +331,17 @@ class NotionLore:
             item = (short_name(page.label), _norm(page.id))
             name = path.lower() if by_path else page.label.lower()
             if not cur or name.startswith(cur):
-                first.append(item)          # 이름이 시작부터 맞음
+                first.append((page.depth, item))      # 이름이 시작부터 맞음
             elif cur in name:
-                second.append(item)         # 이름에 포함
-        return (first + second)[:limit]
+                second.append((page.depth, item))     # 이름에 포함
+        if not cur:
+            first.sort(key=lambda entry: entry[0])    # 입력이 없으면 상위 문서부터(같은 단계는 트리 순서 유지)
+        matches = [item for _, item in first + second]
+        if len(matches) <= limit:
+            return matches
+        # 디스코드 자동완성은 25개까지만 보인다. 잘렸다는 것을 마지막 줄로 알린다.
+        extra = len(matches) - (limit - 1)
+        return matches[:limit - 1] + [(f"… 외 {extra}개 더 있어요 — 글자를 입력해 찾으세요 (고르면 전체 목록)", MORE_VALUE)]
 
     def search(self, keyword: str, limit: int = 10) -> list[tuple[LorePage, str, int]]:
         """각 문서 자신의 본문에서만 찾는다. 하위 페이지의 내용은 그 하위 문서 항목으로 나온다."""

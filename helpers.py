@@ -81,6 +81,13 @@ async def send_paged(interaction: discord.Interaction, title: str, text: str):
     view.message = await interaction.followup.send(embed=view.embed(), view=view, wait=True)
 
 
+async def send_tree(interaction: discord.Interaction, lore, title: str):
+    """모든 문서의 이름을 들여쓰기로 보여준다(긴 목록은 ◀ ▶ 버튼으로 넘김)."""
+    lines = lore.tree_lines()
+    text = "\n".join(lines) + "\n\n읽으려면 /설정 이름" if lines else "문서가 없어요."
+    await send_paged(interaction, title, text)
+
+
 async def ensure_loaded(interaction: discord.Interaction, lore, force: bool = False) -> bool:
     """노션 문서를 (필요하면) 불러온다. 실패하면 안내 메시지를 보내고 False."""
     try:

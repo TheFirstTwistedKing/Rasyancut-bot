@@ -9,7 +9,7 @@ from cogs.character import Character
 from cogs.lore import Lore
 from cogs.search import Search
 from helpers import send_paged
-from notion_api import EMPTY, NotionLore, short_name
+from notion_api import EMPTY, MORE_VALUE, NotionLore, short_name
 
 
 def rt(s):
@@ -229,6 +229,63 @@ class RankingTests(unittest.IsolatedAsyncioTestCase):
         choices = lore.suggest('개요')
         self.assertEqual([n for n, _ in choices], ['개요', '개요'])   # 화면에는 이름만 보인다.
         self.assertEqual([lore.render(lore.get(v)) for _, v in choices], ['하나의 개요', '둘의 개요'])
+
+
+def many_pages_tree(parents=8, children=4):
+    tree = {"root": [page_block(f"T{i}", f"상위 {i}") for i in range(parents)]}
+    for i in range(parents):
+        tree[f"T{i}"] = [page_block(f"T{i}c{j}", f"상위 {i}의 하위 {j}") for j in range(children)]
+        for j in range(children):
+            tree[f"T{i}c{j}"] = [para("x", "내용")]
+    return tree
+
+
+class TooManyChoicesTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.lore = make_lore(many_pages_tree())      # 루트 1 + 상위 8 + 하위 32 = 41개
+        await self.lore.refresh()
+        self.bot = NS(lore=self.lore, characters=self.lore)
+        self.i = NS(response=NS(defer=AsyncMock(), is_done=lambda: True), followup=NS(send=AsyncMock()))
+
+    async def test_empty_input_lists_top_level_pages_first_and_says_there_are_more(self):
+        choices = self.lore.suggest('')
+        self.assertEqual(len(choices), 25)                          # 디스코드 한도
+        labels = [n for n, _ in choices[:-1]]
+        self.assertEqual(labels[:9], ['라시안컷(Rasyancut)'] + [f'상위 {i}' for i in range(8)])   # 상위 문서가 모두 먼저
+        name, value = choices[-1]
+        self.assertEqual(value, MORE_VALUE)
+        self.assertIn('외 17개', name)                                # 41 - 24 = 17
+        self.assertLessEqual(len(name), 100)
+
+    async def test_no_more_row_when_everything_fits(self):
+        self.assertEqual(len(self.lore.suggest('하위 3')), 8)
+        self.assertNotIn(MORE_VALUE, [v for _, v in self.lore.suggest('하위 3')])
+        small = make_lore(many_pages_tree(parents=3, children=7))   # 1 + 3 + 21 = 25개 → 딱 맞음
+        await small.refresh()
+        self.assertEqual(len(small.suggest('')), 25)
+        self.assertNotIn(MORE_VALUE, [v for _, v in small.suggest('')])
+        bigger = make_lore(many_pages_tree(parents=3, children=8))  # 28개 → 24개 + 안내 줄
+        await bigger.refresh()
+        self.assertEqual(bigger.suggest('')[-1][1], MORE_VALUE)
+        self.assertIn('외 4개', bigger.suggest('')[-1][0])
+
+    async def test_typing_reaches_pages_that_were_not_listed(self):
+        choices = self.lore.suggest('상위 7')
+        self.assertEqual([self.lore.get(v).label for _, v in choices][:2], ['상위 7', '상위 7의 하위 0'])
+
+    async def test_choosing_the_more_row_shows_the_whole_structure(self):
+        await Lore.show.callback(Lore(self.bot), self.i, MORE_VALUE)
+        embed = self.i.followup.send.call_args.kwargs['embed']
+        self.assertEqual(embed.title, '세계관 문서')
+        self.assertIn('• 상위 0', embed.description)
+        self.assertIn('읽으려면 /설정 이름', embed.description)
+        await Character.show.callback(Character(self.bot), self.i, MORE_VALUE)
+        self.assertEqual(self.i.followup.send.call_args.kwargs['embed'].title, '캐릭터')
+
+    async def test_choosing_the_more_row_does_not_open_a_page_or_say_not_found(self):
+        await Lore.show.callback(Lore(self.bot), self.i, MORE_VALUE)
+        sent = self.i.followup.send.call_args
+        self.assertNotIn('찾지 못했어요', str(sent))
 
 
 class LimitsAndFailuresTests(unittest.IsolatedAsyncioTestCase):

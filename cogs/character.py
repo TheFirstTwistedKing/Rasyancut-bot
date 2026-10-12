@@ -2,7 +2,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helpers import ensure_loaded, send_paged
+from helpers import ensure_loaded, send_paged, send_tree
+from notion_api import MORE_VALUE
 
 
 class Character(commands.Cog):
@@ -21,6 +22,9 @@ class Character(commands.Cog):
             await interaction.followup.send("캐릭터 페이지가 아직 설정되지 않았어요. (`NOTION_CHARACTER_PAGE_ID`)")
             return
         if not await ensure_loaded(interaction, source):
+            return
+        if name.strip() == MORE_VALUE:   # 자동완성의 '… 외 N개 더 있어요'를 고른 경우
+            await send_tree(interaction, source, "캐릭터")
             return
         page = source.get(name)
         if page is None:

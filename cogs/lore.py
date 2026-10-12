@@ -4,7 +4,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helpers import ensure_loaded, send_paged
+from helpers import ensure_loaded, send_paged, send_tree
+from notion_api import MORE_VALUE
 
 
 class AddLoreModal(discord.ui.Modal, title="설정 추가"):
@@ -42,9 +43,7 @@ class Lore(commands.Cog):
         await interaction.response.defer()
         if not await ensure_loaded(interaction, self.bot.lore):
             return
-        lines = self.bot.lore.tree_lines()
-        text = "\n".join(lines) + "\n\n읽으려면 /설정 이름" if lines else "문서가 없어요."
-        await send_paged(interaction, "세계관 문서", text)
+        await send_tree(interaction, self.bot.lore, "세계관 문서")
 
     @app_commands.command(name="설정", description="세계관 문서를 읽어요")
     @app_commands.rename(name="이름")
@@ -52,6 +51,9 @@ class Lore(commands.Cog):
     async def show(self, interaction: discord.Interaction, name: str):
         await interaction.response.defer()
         if not await ensure_loaded(interaction, self.bot.lore):
+            return
+        if name.strip() == MORE_VALUE:   # 자동완성의 '… 외 N개 더 있어요'를 고른 경우
+            await send_tree(interaction, self.bot.lore, "세계관 문서")
             return
         page = self.bot.lore.get(name)
         if page is None:

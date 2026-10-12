@@ -65,6 +65,22 @@ def _unique(taken, path: str) -> str:
     return f"{path} ({n})"
 
 
+def short_name(path: str, limit: int = 100) -> str:
+    """디스코드 선택지 이름은 100자까지다. 길면 앞(상위)을 줄이고 구분에 가장 중요한 마지막 이름을 남긴다."""
+    if len(path) <= limit:
+        return path
+    parts = path.split(" / ")
+    name = parts[-1]
+    if len(name) > limit:
+        return name[:limit - 1] + "…"
+    prefix = "… / "
+    for part in reversed(parts[:-1]):
+        if len(prefix + part + " / " + name) > limit:
+            break
+        name = part + " / " + name
+    return prefix + name
+
+
 def _clean(lines: list[str]) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
@@ -308,14 +324,17 @@ class NotionLore:
     def suggest(self, current: str, limit: int = 25) -> list[tuple[str, str]]:
         """자동완성용 (표시 이름, 값). 값은 문서 id라서 이름이 길어도 정확히 찾아진다."""
         cur = current.strip().lower()
-        starts, contains = [], []
+        first, second, third = [], [], []
         for path, page in self._pages.items():
-            item = (path[:100], _norm(page.id))
-            if not cur or path.lower().startswith(cur) or page.title.lower().startswith(cur):
-                starts.append(item)
+            item = (short_name(path), _norm(page.id))
+            title = page.title.lower()
+            if not cur or title.startswith(cur) or path.lower().startswith(cur):
+                first.append(item)          # 이 문서 자신의 이름이 시작부터 맞음
+            elif cur in title:
+                second.append(item)         # 이 문서 자신의 이름에 포함
             elif cur in path.lower():
-                contains.append(item)
-        return (starts + contains)[:limit]
+                third.append(item)          # 상위 문서 이름에만 포함(그 아래 문서들)
+        return (first + second + third)[:limit]
 
     def search(self, keyword: str, limit: int = 10) -> list[tuple[LorePage, str, int]]:
         """각 문서 자신의 본문에서만 찾는다. 하위 페이지의 내용은 그 하위 문서 항목으로 나온다."""

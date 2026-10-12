@@ -27,7 +27,7 @@ class Character(commands.Cog):
             names = ", ".join(source.top_titles()[:15]) or "없음"
             await interaction.followup.send(f"'{name[:50]}' 캐릭터를 찾지 못했어요.\n등록된 캐릭터: {names}")
             return
-        await send_paged(interaction, page.path, source.render(page))
+        await send_paged(interaction, page.label, source.render(page))
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):

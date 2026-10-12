@@ -21,6 +21,7 @@ MAX_PAGE_DEPTH = 6     # 페이지 안의 페이지를 따라 내려가는 최�
 MAX_PAGES = 300        # 한 번에 읽을 최대 문서 수 (노션 요청 제한과 대기 시간 보호)
 EMPTY = "내용 없음"
 CHILD_MARK = "\x00child:"   # 본문 속 하위 페이지 자리를 나타내는 내부 표식
+LIST_MARK = "\x00list:"     # 봇이 덧붙인 '하위 문서 이름' 줄. 화면에는 보이지만 검색 대상이 아니다.
 
 
 @dataclass
@@ -30,6 +31,11 @@ class LorePage:
     path: str       # '상위 / 하위' 형태의 전체 이름. 최상위 문서는 title과 같다.
     depth: int      # 0 = 최상위 문서
     raw: str        # 본문. 하위 페이지 자리는 내부 표식으로 남겨 둔다.
+    label: str = ""  # 화면에 보여줄 이름. 상위 이름 없이 이 페이지 이름만. 같은 상위 아래 이름이 겹치면 '(2)'가 붙는다.
+
+    def __post_init__(self):
+        if not self.label:
+            self.label = self.title
 
 
 @dataclass
@@ -65,20 +71,9 @@ def _unique(taken, path: str) -> str:
     return f"{path} ({n})"
 
 
-def short_name(path: str, limit: int = 100) -> str:
-    """디스코드 선택지 이름은 100자까지다. 길면 앞(상위)을 줄이고 구분에 가장 중요한 마지막 이름을 남긴다."""
-    if len(path) <= limit:
-        return path
-    parts = path.split(" / ")
-    name = parts[-1]
-    if len(name) > limit:
-        return name[:limit - 1] + "…"
-    prefix = "… / "
-    for part in reversed(parts[:-1]):
-        if len(prefix + part + " / " + name) > limit:
-            break
-        name = part + " / " + name
-    return prefix + name
+def short_name(label: str, limit: int = 100) -> str:
+    """디스코드 선택지 이름은 100자까지다. 넘으면 끝을 줄인다."""
+    return label if len(label) <= limit else label[:limit - 1] + "…"
 
 
 def _clean(lines: list[str]) -> str:
@@ -124,9 +119,9 @@ class NotionLore:
         """하위 페이지를 읽어 registry에 등록하고, 본문에 끼울 표식 줄을 돌려준다."""
         title = b["child_page"].get("title") or "(제목 없음)"
         if not ctx.descend:
-            return f"📄 {title}"
+            return LIST_MARK + title
         if ctx.level + 1 > MAX_PAGE_DEPTH or ctx.budget[0] <= 0:
-            return f"📄 {title} (더 내려가지 않음)"
+            return f"{LIST_MARK}{title} (더 내려가지 않음)"
         ctx.budget[0] -= 1
         path = _unique(ctx.registry, f"{ctx.path} / {title}")
         ctx.registry[path] = None  # 트리 순서를 지키기 위해 자리를 먼저 예약
@@ -135,8 +130,9 @@ class NotionLore:
         except Exception as exc:  # 한 페이지를 못 읽어도 나머지는 계속 보여준다.
             logging.warning("하위 페이지를 읽지 못했어요: %s (%r)", path, exc)
             ctx.registry.pop(path, None)
-            return f"📄 {title} (읽지 못함)"
-        ctx.registry[path] = LorePage(b["id"], title, path, ctx.level + 1, _clean(lines))
+            return f"{LIST_MARK}{title} (읽지 못함)"
+        label = path[len(ctx.path) + 3:]   # '상위 / ' 뒤의 이름(겹침 표시 포함)
+        ctx.registry[path] = LorePage(b["id"], title, path, ctx.level + 1, _clean(lines), label)
         return CHILD_MARK + path
 
     async def _blocks_to_lines(self, block_id: str, depth: int, ctx: _Ctx) -> list[str]:
@@ -281,7 +277,7 @@ class NotionLore:
     def tree_lines(self) -> list[str]:
         lines = []
         for page in self._pages.values():
-            lines.append(f"• {page.title}" if page.depth == 0 else f"{'　' * (page.depth - 1)}└ {page.title}")
+            lines.append(f"• {page.label}" if page.depth == 0 else f"{'　' * (page.depth - 1)}└ {page.label}")
         return lines
 
     def render(self, page: LorePage, level: int = 0) -> str:
@@ -293,14 +289,16 @@ class NotionLore:
                 if child is None or level >= MAX_PAGE_DEPTH:
                     continue
                 marker = "└" * level + (" " if level else "")
-                lines += ["", f"**{marker}📄 {child.title}**", self.render(child, level + 1)]
+                lines += ["", f"**{marker}📄 {child.label}**", self.render(child, level + 1)]
+            elif line.startswith(LIST_MARK):
+                lines.append("📄 " + line[len(LIST_MARK):])
             else:
                 lines.append(line)
         return _clean(lines) or EMPTY
 
     def own_text(self, page: LorePage) -> str:
         """하위 페이지 내용을 뺀 이 페이지만의 본문(검색용)."""
-        return _clean([ln for ln in page.raw.split("\n") if not ln.startswith(CHILD_MARK)])
+        return _clean([ln for ln in page.raw.split("\n") if not ln.startswith((CHILD_MARK, LIST_MARK))])
 
     def get(self, query: str) -> LorePage | None:
         raw = query.strip()
@@ -314,7 +312,7 @@ class NotionLore:
             if path.lower() == q:
                 return page
         for path, page in self._pages.items():
-            if page.title.lower() == q:
+            if page.title.lower() == q or page.label.lower() == q:
                 return page
         for path, page in self._pages.items():
             if q in path.lower():
@@ -324,17 +322,16 @@ class NotionLore:
     def suggest(self, current: str, limit: int = 25) -> list[tuple[str, str]]:
         """자동완성용 (표시 이름, 값). 값은 문서 id라서 이름이 길어도 정확히 찾아진다."""
         cur = current.strip().lower()
-        first, second, third = [], [], []
+        by_path = " / " in cur   # 경로를 직접 입력한 경우에만 상위 이름까지 본다
+        first, second = [], []
         for path, page in self._pages.items():
-            item = (short_name(path), _norm(page.id))
-            title = page.title.lower()
-            if not cur or title.startswith(cur) or path.lower().startswith(cur):
-                first.append(item)          # 이 문서 자신의 이름이 시작부터 맞음
-            elif cur in title:
-                second.append(item)         # 이 문서 자신의 이름에 포함
-            elif cur in path.lower():
-                third.append(item)          # 상위 문서 이름에만 포함(그 아래 문서들)
-        return (first + second + third)[:limit]
+            item = (short_name(page.label), _norm(page.id))
+            name = path.lower() if by_path else page.label.lower()
+            if not cur or name.startswith(cur):
+                first.append(item)          # 이름이 시작부터 맞음
+            elif cur in name:
+                second.append(item)         # 이름에 포함
+        return (first + second)[:limit]
 
     def search(self, keyword: str, limit: int = 10) -> list[tuple[LorePage, str, int]]:
         """각 문서 자신의 본문에서만 찾는다. 하위 페이지의 내용은 그 하위 문서 항목으로 나온다."""
@@ -346,7 +343,7 @@ class NotionLore:
             own = self.own_text(page)
             low = own.lower()
             count = low.count(k)
-            if count or k in page.path.lower():
+            if count or k in page.label.lower():
                 i = low.find(k)
                 if i >= 0:
                     snippet = own[max(0, i - 40): i + len(k) + 60]

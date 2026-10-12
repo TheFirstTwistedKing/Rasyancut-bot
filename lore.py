@@ -57,7 +57,7 @@ class Lore(commands.Cog):
         if page is None:
             await interaction.followup.send(f"'{name[:50]}' 문서를 찾지 못했어요. `/목록`으로 확인해 보세요.")
             return
-        await send_paged(interaction, page.path, self.bot.lore.render(page))
+        await send_paged(interaction, page.label, self.bot.lore.render(page))
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):

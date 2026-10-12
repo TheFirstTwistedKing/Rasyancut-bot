@@ -15,6 +15,7 @@ from notion_client import AsyncClient
 from notion_client.errors import APIResponseError
 from notion_client.helpers import async_collect_paginated_api
 
+VERSION = "2026-10-12 이름만 표시"   # 시작할 때 콘솔에 찍혀, 어떤 버전이 실행 중인지 확인할 수 있다.
 CACHE_TTL = 300        # 초. 노션 수정 내용이 최대 5분 뒤 반영돼요.
 MAX_DEPTH = 3          # 토글·들여쓰기 같은 하위 블록을 읽는 깊이
 MAX_PAGE_DEPTH = 6     # 페이지 안의 페이지를 따라 내려가는 최대 단계
@@ -235,6 +236,7 @@ class NotionLore:
             self._pages = pages
             self._by_id = {_norm(p.id): path for path, p in pages.items()}
             self._loaded_at = time.time()
+            logging.info("노션 읽기 모듈 버전: %s / 문서 %d개", VERSION, len(pages))
 
     # ---------------- 쓰기 ----------------
     @staticmethod

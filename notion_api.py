@@ -15,7 +15,10 @@ from notion_client import AsyncClient
 from notion_client.errors import APIResponseError
 from notion_client.helpers import async_collect_paginated_api
 
-VERSION = "2026-10-12 이름만 표시 · 25개 초과 안내"   # 시작할 때 콘솔에 찍혀, 어떤 버전이 실행 중인지 확인할 수 있다.
+VERSION = "2026-10-12 이름만 표시 · 25개 초과 안내 · 하위 내용 숨김"   # 시작할 때 콘솔에 찍혀, 어떤 버전이 실행 중인지 확인할 수 있다.
+# False: 문서를 열면 그 문서에 쓰인 내용만 보여주고 하위 페이지는 '📄 이름'으로만 표시한다.
+# True : 하위 페이지의 내용까지 본문 순서대로 함께 보여준다. (하위 페이지는 어느 쪽이든 /설정 이름 으로 따로 열 수 있다.)
+INLINE_SUBPAGES = False
 CACHE_TTL = 300        # 초. 노션 수정 내용이 최대 5분 뒤 반영돼요.
 MAX_DEPTH = 3          # 토글·들여쓰기 같은 하위 블록을 읽는 깊이
 MAX_PAGE_DEPTH = 6     # 페이지 안의 페이지를 따라 내려가는 최대 단계
@@ -283,16 +286,25 @@ class NotionLore:
             lines.append(f"• {page.label}" if page.depth == 0 else f"{'　' * (page.depth - 1)}└ {page.label}")
         return lines
 
-    def render(self, page: LorePage, level: int = 0) -> str:
-        """페이지 본문에 하위 페이지의 내용을 순서대로 끼워 넣은 표시용 글. 비어 있으면 '내용 없음'."""
+    def render(self, page: LorePage, level: int = 0, inline: bool | None = None) -> str:
+        """표시용 글. 기본은 이 문서에 쓰인 내용만(하위 페이지는 이름만). 비어 있으면 '내용 없음'.
+
+        inline=True(또는 INLINE_SUBPAGES=True)이면 하위 페이지 내용을 본문 순서대로 끼워 넣는다.
+        """
+        inline = INLINE_SUBPAGES if inline is None else inline
         lines: list[str] = []
         for line in page.raw.split("\n"):
             if line.startswith(CHILD_MARK):
                 child = self._pages.get(line[len(CHILD_MARK):])
-                if child is None or level >= MAX_PAGE_DEPTH:
+                if child is None:
+                    continue
+                if not inline:
+                    lines.append(f"📄 {child.label}")
+                    continue
+                if level >= MAX_PAGE_DEPTH:
                     continue
                 marker = "└" * level + (" " if level else "")
-                lines += ["", f"**{marker}📄 {child.label}**", self.render(child, level + 1)]
+                lines += ["", f"**{marker}📄 {child.label}**", self.render(child, level + 1, inline)]
             elif line.startswith(LIST_MARK):
                 lines.append("📄 " + line[len(LIST_MARK):])
             else:

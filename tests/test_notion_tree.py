@@ -89,28 +89,39 @@ class TreeReadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.lore.top_titles(), ['라시안컷(Rasyancut)', '빛과 어둠', '비어 있는 문서', '목차만 있는 문서',
                                                   '개요', '개요 (2)', '링크 문서'])
 
-    async def test_parent_shows_all_descendants_in_document_order(self):
-        text = self.lore.render(self.lore.get('빛과 어둠'))
+    async def test_inline_mode_shows_all_descendants_in_document_order(self):
+        text = self.lore.render(self.lore.get('빛과 어둠'), inline=True)
         order = [text.index(s) for s in ['빛과 어둠 본문.', '📄 나스켄티아', '나스켄티아에는 두 지점이 있다.',
                                          '└ 📄 동쪽 지점', '└ 📄 서쪽 지점', '서쪽 지점은 어둠이 시작되는 곳.',
                                          '토글 안의 글', '빛과 어둠 마지막 문장.']]
         self.assertEqual(order, sorted(order))           # 본문 중간에 있던 하위 페이지가 제자리에 나온다.
         self.assertIn('토글 안의 글', text)                 # 토글 안의 글도 읽는다.
 
+    async def test_default_shows_only_the_pages_own_text_with_subpage_names_in_place(self):
+        text = self.lore.render(self.lore.get('빛과 어둠'))
+        self.assertEqual(text, '빛과 어둠 본문.\n📄 나스켄티아\n빛과 어둠 마지막 문장.')   # 이름이 원래 자리에 한 줄로만
+        child = self.lore.render(self.lore.get('빛과 어둠 / 나스켄티아'))
+        self.assertIn('📄 동쪽 지점', child)
+        self.assertIn('📄 서쪽 지점', child)
+        self.assertNotIn('어둠이 시작되는 곳', child)
+        self.assertNotIn('빛과 어둠 본문', child)
+
     async def test_empty_pages_say_nothing_here(self):
         self.assertEqual(self.lore.render(self.lore.get('비어 있는 문서')), EMPTY)
-        text = self.lore.render(self.lore.get('빛과 어둠'))
+        text = self.lore.render(self.lore.get('빛과 어둠'), inline=True)
         east = text.index('└ 📄 동쪽 지점')
         self.assertTrue(text[east:].split('\n', 1)[1].lstrip().startswith(EMPTY))   # 빈 하위 페이지 밑에 표시
         self.assertEqual(self.lore.render(self.lore.get('빛과 어둠 / 나스켄티아 / 동쪽 지점')), EMPTY)
 
     async def test_page_with_only_subpages_is_not_called_empty(self):
         text = self.lore.render(self.lore.get('목차만 있는 문서'))
-        self.assertIn('하위 하나의 내용', text)
-        self.assertNotIn(EMPTY, text)
+        self.assertEqual(text, '📄 하위 하나')   # 기본: 이름만. 하위 내용은 나오지 않는다.
+        inline = self.lore.render(self.lore.get('목차만 있는 문서'), inline=True)
+        self.assertIn('하위 하나의 내용', inline)
+        self.assertNotIn(EMPTY, inline)
 
-    async def test_nested_page_opens_by_itself_with_its_own_descendants(self):
-        text = self.lore.render(self.lore.get('빛과 어둠 / 나스켄티아'))
+    async def test_inline_mode_nested_page_opens_by_itself_with_its_own_descendants(self):
+        text = self.lore.render(self.lore.get('빛과 어둠 / 나스켄티아'), inline=True)
         self.assertIn('📄 동쪽 지점', text)                 # 이 페이지 기준 1단계 표시
         self.assertNotIn('└ 📄', text.split('📄 동쪽 지점')[0])
         self.assertNotIn('빛과 어둠 본문', text)             # 상위 내용은 섞이지 않는다.
@@ -122,7 +133,8 @@ class TreeReadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('빛과 어둠 본문', text)
 
     async def test_linked_pages_also_bring_their_subpages(self):
-        self.assertIn('링크 하위 내용', self.lore.render(self.lore.get('링크 문서')))
+        self.assertIn('링크 하위 내용', self.lore.render(self.lore.get('링크 문서'), inline=True))
+        self.assertNotIn('링크 하위 내용', self.lore.render(self.lore.get('링크 문서')))   # 기본은 이름만
 
     async def test_lookup_by_id_path_leaf_and_partial(self):
         by_path = self.lore.get('빛과 어둠 / 나스켄티아')
@@ -293,9 +305,11 @@ class LimitsAndFailuresTests(unittest.IsolatedAsyncioTestCase):
         tree = {**TREE, "A1b": RuntimeError("접근 불가")}
         lore = make_lore(tree)
         await lore.refresh()
-        text = lore.render(lore.get('빛과 어둠'))
+        text = lore.render(lore.get('빛과 어둠'), inline=True)
         self.assertIn('서쪽 지점 (읽지 못함)', text)
         self.assertIn('나스켄티아에는 두 지점이 있다.', text)
+        own = lore.render(lore.get('빛과 어둠 / 나스켄티아'))   # 기본 모드: 그 문서에서 읽지 못한 하위 페이지는 표시만
+        self.assertIn('📄 서쪽 지점 (읽지 못함)', own)
         self.assertNotIn('빛과 어둠 / 나스켄티아 / 서쪽 지점', lore.titles())
 
     async def test_depth_limit(self):
@@ -308,7 +322,8 @@ class LimitsAndFailuresTests(unittest.IsolatedAsyncioTestCase):
             notion_api.MAX_PAGE_DEPTH = original
         self.assertIn('빛과 어둠 / 나스켄티아', lore.titles())
         self.assertNotIn('빛과 어둠 / 나스켄티아 / 동쪽 지점', lore.titles())
-        self.assertIn('동쪽 지점 (더 내려가지 않음)', lore.render(lore.get('빛과 어둠')))
+        self.assertIn('동쪽 지점 (더 내려가지 않음)', lore.render(lore.get('빛과 어둠'), inline=True))
+        self.assertIn('📄 동쪽 지점 (더 내려가지 않음)', lore.render(lore.get('빛과 어둠 / 나스켄티아')))
 
     async def test_page_budget_limit(self):
         original = notion_api.MAX_PAGES
@@ -344,13 +359,40 @@ class CommandOutputTests(unittest.IsolatedAsyncioTestCase):
     def sent_embed(self):
         return self.i.followup.send.call_args.kwargs['embed']
 
-    async def test_setting_command_shows_nested_content_and_path_title(self):
+    async def test_setting_command_shows_only_what_is_written_in_the_page(self):
         cog = Lore(self.bot)
         await Lore.show.callback(cog, self.i, 'A1')
         embed = self.sent_embed()
         self.assertEqual(embed.title, '나스켄티아')   # 상위 이름 없이 이 문서 이름만
+        self.assertIn('나스켄티아에는 두 지점이 있다.', embed.description)
+        self.assertIn('📄 동쪽 지점', embed.description)     # 하위 페이지는 이름만
+        self.assertIn('📄 서쪽 지점', embed.description)
+        self.assertNotIn('서쪽 지점은 어둠이 시작되는 곳.', embed.description)   # 하위 내용은 나오지 않는다.
+        self.assertNotIn('토글 안의 글', embed.description)
+        self.assertNotIn(EMPTY, embed.description)
+
+    async def test_shipped_default_hides_subpage_content(self):
+        self.assertIs(notion_api.INLINE_SUBPAGES, False)
+
+    async def test_the_subpage_itself_can_still_be_opened_by_name(self):
+        await Lore.show.callback(Lore(self.bot), self.i, '서쪽 지점')
+        embed = self.sent_embed()
+        self.assertEqual(embed.title, '서쪽 지점')
         self.assertIn('서쪽 지점은 어둠이 시작되는 곳.', embed.description)
-        self.assertIn(EMPTY, embed.description)
+        self.assertIn('토글 안의 글', embed.description)
+        await Lore.show.callback(Lore(self.bot), self.i, '동쪽 지점')
+        self.assertEqual(self.sent_embed().description, EMPTY)   # 내용이 없으면 '내용 없음'
+
+    async def test_module_switch_turns_subpage_content_back_on(self):
+        original = notion_api.INLINE_SUBPAGES      # 다른 테스트에 영향이 없게 원래 값으로 복원한다.
+        notion_api.INLINE_SUBPAGES = True
+        try:
+            await Lore.show.callback(Lore(self.bot), self.i, 'A1')
+        finally:
+            notion_api.INLINE_SUBPAGES = original
+        description = self.sent_embed().description
+        self.assertIn('서쪽 지점은 어둠이 시작되는 곳.', description)
+        self.assertIn(EMPTY, description)
 
     async def test_setting_command_on_an_empty_page(self):
         await Lore.show.callback(Lore(self.bot), self.i, '비어 있는 문서')
@@ -387,7 +429,7 @@ class CommandOutputTests(unittest.IsolatedAsyncioTestCase):
         tree = {**TREE, "A1b": [para(f"p{n}", "가" * 900) for n in range(12)]}
         lore = make_lore(tree)
         await lore.refresh()
-        text = lore.render(lore.get('빛과 어둠'))
+        text = lore.render(lore.get('빛과 어둠'), inline=True)
         await send_paged(self.i, '제목', text)
         view = self.i.followup.send.call_args.kwargs['view']
         self.assertGreater(len(view.chunks), 1)

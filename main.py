@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+import access
 from notion_api import NotionLore
 
 load_dotenv()
@@ -19,11 +20,24 @@ class WorldBot(commands.Bot):
         # 캐릭터 전용 상위 페이지가 정해졌을 때만 사용 (없으면 None)
         char_root = os.getenv("NOTION_CHARACTER_PAGE_ID")
         self.characters = NotionLore(token, char_root, include_root=False) if char_root else None
+        self.tree.interaction_check = self.check_access
+
+    async def check_access(self, interaction):
+        """모든 명령어와 자동완성 요청에 먼저 적용되는 검사."""
+        if access.allowed(interaction):
+            return True
+        if interaction.type is not discord.InteractionType.autocomplete:   # 자동완성에는 답장할 수 없다.
+            try:
+                await interaction.response.send_message("이 명령어를 사용할 권한이 없어요.", ephemeral=True)
+            except discord.HTTPException:
+                pass
+        return False
 
     async def setup_hook(self):
         await self.load_extension("cogs.lore")
         await self.load_extension("cogs.search")
         await self.load_extension("cogs.character")
+        await self.load_extension("cogs.homepage")
 
         # 쉼표로 서버 ID를 여러 개 적을 수 있어요 (예: 111,222). 비우면 전체 서버에 등록.
         raw = os.getenv("DISCORD_GUILD_ID", "")

@@ -4,8 +4,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import access
 from helpers import ensure_loaded, send_paged, send_tree
-from notion_api import MORE_VALUE
+from notion_api import PRIVATE_MARKERS
+from views import open_document
 
 
 class AddLoreModal(discord.ui.Modal, title="설정 추가"):
@@ -49,22 +51,35 @@ class Lore(commands.Cog):
     @app_commands.rename(name="이름")
     @app_commands.describe(name="문서 이름 (일부만 입력해도 돼요)")
     async def show(self, interaction: discord.Interaction, name: str):
-        await interaction.response.defer()
-        if not await ensure_loaded(interaction, self.bot.lore):
-            return
-        if name.strip() == MORE_VALUE:   # 자동완성의 '… 외 N개 더 있어요'를 고른 경우
-            await send_tree(interaction, self.bot.lore, "세계관 문서")
-            return
-        page = self.bot.lore.get(name)
-        if page is None:
-            await interaction.followup.send(f"'{name[:50]}' 문서를 찾지 못했어요. `/목록`으로 확인해 보세요.")
-            return
-        await send_paged(interaction, page.label, self.bot.lore.render(page))
+        await open_document(interaction, self.bot.lore, name, list_title="세계관 문서")
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):
+        # 자동완성은 입력하는 본인에게만 보인다. 비공개 문서는 관리자에게만 나온다.
         return [app_commands.Choice(name=name, value=value)
-                for name, value in self.bot.lore.suggest(current)]
+                for name, value in self.bot.lore.suggest(current, include_private=access.is_admin(interaction))]
+
+    @app_commands.command(name="비공개목록", description="비공개로 숨긴 문서 목록을 보여줘요 (관리자)")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def private_docs(self, interaction: discord.Interaction):
+        if not access.is_admin(interaction):
+            await interaction.response.send_message("이 명령어를 사용할 권한이 없어요.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        sources = [("세계관 문서", self.bot.lore), ("캐릭터", self.bot.characters)]
+        sections = []
+        for title, source in sources:
+            if source is None or not await ensure_loaded(interaction, source):
+                continue
+            lines = source.private_lines()
+            if lines:
+                sections.append(f"**{title} ({len(lines)}개)**\n" + "\n".join(lines))
+        marks = " 또는 ".join(PRIVATE_MARKERS)
+        note = (f"제목에 {marks}가 들어간 문서와 그 하위 문서예요. 관리자만 `/설정 이름`으로 열 수 있고, "
+                "열면 본인에게만 보여요. `/목록`, `/검색`, 선택창에는 나오지 않아요.")
+        text = "\n\n".join(sections) + "\n\n" + note if sections else f"비공개 문서가 없어요. {note}"
+        await send_paged(interaction, "비공개 문서", text)
 
     @app_commands.command(name="설정추가", description="새 세계관 문서를 노션에 추가해요 (서버 관리자)")
     @app_commands.rename(name="이름")

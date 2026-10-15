@@ -354,10 +354,15 @@ class CommandOutputTests(unittest.IsolatedAsyncioTestCase):
         self.lore = make_lore()
         await self.lore.refresh()   # 봇은 시작할 때 한 번 불러온다. 자동완성은 이 캐시만 읽는다.
         self.bot = NS(lore=self.lore, characters=self.lore)
-        self.i = NS(response=NS(defer=AsyncMock(), is_done=lambda: True), followup=NS(send=AsyncMock()))
+        self.i = NS(guild_id=None, user=NS(id=20), permissions=None, data={},
+                    response=NS(defer=AsyncMock(), is_done=lambda: True), followup=NS(send=AsyncMock()))
 
     def sent_embed(self):
-        return self.i.followup.send.call_args.kwargs['embed']
+        """마지막으로 보낸 메시지의 본문 임베드. 문서는 embeds(본문+이미지), 목록·검색은 embed로 나간다."""
+        kwargs = self.i.followup.send.call_args.kwargs
+        if kwargs.get('view') is not None:
+            self.addCleanup(kwargs['view'].stop)
+        return kwargs['embeds'][0] if 'embeds' in kwargs else kwargs['embed']
 
     async def test_setting_command_shows_only_what_is_written_in_the_page(self):
         cog = Lore(self.bot)

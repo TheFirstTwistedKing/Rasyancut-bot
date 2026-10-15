@@ -2,8 +2,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helpers import ensure_loaded, send_paged, send_tree
-from notion_api import MORE_VALUE
+import access
+from views import open_document
 
 
 class Character(commands.Cog):
@@ -16,29 +16,23 @@ class Character(commands.Cog):
     @app_commands.rename(name="이름")
     @app_commands.describe(name="캐릭터 이름 (일부만 입력해도 돼요)")
     async def show(self, interaction: discord.Interaction, name: str):
-        await interaction.response.defer()
         source = self.bot.characters
         if source is None:
-            await interaction.followup.send("캐릭터 페이지가 아직 설정되지 않았어요. (`NOTION_CHARACTER_PAGE_ID`)")
+            await interaction.response.send_message("캐릭터 페이지가 아직 설정되지 않았어요. (`NOTION_CHARACTER_PAGE_ID`)")
             return
-        if not await ensure_loaded(interaction, source):
-            return
-        if name.strip() == MORE_VALUE:   # 자동완성의 '… 외 N개 더 있어요'를 고른 경우
-            await send_tree(interaction, source, "캐릭터")
-            return
-        page = source.get(name)
-        if page is None:
+
+        def not_found(query, similar):
             names = ", ".join(source.top_titles()[:15]) or "없음"
-            await interaction.followup.send(f"'{name[:50]}' 캐릭터를 찾지 못했어요.\n등록된 캐릭터: {names}")
-            return
-        await send_paged(interaction, page.label, source.render(page))
+            hint = f"\n혹시 이걸 찾으셨나요? {', '.join(similar)}" if similar else ""
+            return f"'{query[:50]}' 캐릭터를 찾지 못했어요.{hint}\n등록된 캐릭터: {names}"
+        await open_document(interaction, source, name, list_title="캐릭터", not_found=not_found)
 
     @show.autocomplete("name")
     async def show_autocomplete(self, interaction: discord.Interaction, current: str):
         if self.bot.characters is None:
             return []
         return [app_commands.Choice(name=name, value=value)
-                for name, value in self.bot.characters.suggest(current)]
+                for name, value in self.bot.characters.suggest(current, include_private=access.is_admin(interaction))]
 
 
 async def setup(bot: commands.Bot):

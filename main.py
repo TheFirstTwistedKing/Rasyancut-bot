@@ -38,6 +38,7 @@ class WorldBot(commands.Bot):
         await self.load_extension("cogs.search")
         await self.load_extension("cogs.character")
         await self.load_extension("cogs.homepage")
+        await self.load_extension("cogs.notify")
 
         # 쉼표로 서버 ID를 여러 개 적을 수 있어요 (예: 111,222). 비우면 전체 서버에 등록.
         raw = os.getenv("DISCORD_GUILD_ID", "")

@@ -1,5 +1,7 @@
 """홈페이지 명령어와 서버별 접근 규칙 테스트. 실제 디스코드 상호작용 객체를 명령 처리 경로(tree._call)에 통과시킨다."""
+import asyncio
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -67,8 +69,12 @@ class RealInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.state = self.bot._connection
         self.state.user = discord.ClientUser(state=self.state, data={
             'id': '999', 'username': 'bot', 'discriminator': '0', 'avatar': None, 'bot': True})
-        for extension in ('cogs.lore', 'cogs.search', 'cogs.character', 'cogs.homepage'):
-            await self.bot.load_extension(extension)
+        self.bot._ready = asyncio.Event()      # 로그인한 봇은 setup_hook보다 먼저 이 신호가 만들어진다.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with mock.patch.dict(os.environ, {'DATA_DIR': temp.name}):      # 알림 설정 파일이 실제 data 폴더를 건드리지 않게
+            for extension in ('cogs.lore', 'cogs.search', 'cogs.character', 'cogs.homepage', 'cogs.notify'):
+                await self.bot.load_extension(extension)
         patcher = mock.patch.object(discord.InteractionResponse, 'send_message', new_callable=AsyncMock)
         self.send = patcher.start()
         self.addCleanup(patcher.stop)
@@ -77,6 +83,9 @@ class RealInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
         patcher = mock.patch.object(discord.InteractionResponse, 'defer', new_callable=AsyncMock)
         self.defer = patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(discord.Webhook, 'send', new_callable=AsyncMock)
+        self.followup_send = patcher.start()
         self.addCleanup(patcher.stop)
 
     async def asyncTearDown(self):
@@ -96,7 +105,17 @@ class RealInteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_check_is_installed_on_the_command_tree(self):
         self.assertEqual(self.bot.tree.interaction_check, self.bot.check_access)
         names = {c.name for c in self.bot.tree.get_commands()}
-        self.assertTrue({'홈페이지', '목록', '설정', '설정추가', '검색', '캐릭터', '새로고침'} <= names)
+        self.assertTrue({'홈페이지', '목록', '설정', '설정추가', '검색', '캐릭터', '새로고침', '비공개목록', '알림채널', '알림해제'} <= names)
+
+    async def test_every_command_can_be_sent_to_discord(self):
+        commands = self.bot.tree.get_commands()
+        self.assertEqual(len(commands), 10)
+        for command in commands:
+            payload = command.to_dict(self.bot.tree)                   # 이름·설명·옵션이 디스코드 규칙에 맞는지 확인
+            self.assertLessEqual(len(payload['description']), 100, command.name)
+            self.assertLessEqual(len(payload['name']), 32, command.name)
+            for option in payload.get('options', []):
+                self.assertLessEqual(len(option['description']), 100, command.name)
 
     async def test_admin_gets_the_homepage_link_and_button(self):
         await self.bot.tree._call(self.interaction(RESTRICTED, ADMIN))
@@ -143,12 +162,61 @@ class RealInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.autocomplete.assert_not_awaited()
             suggest.assert_not_called()                              # 문서 이름 목록이 만들어지지도 않는다.
             await self.bot.tree._call(self.interaction(RESTRICTED, ADMIN, name='설정', kind=4, options=options))
-            suggest.assert_called_once_with('나')
+            suggest.assert_called_once_with('나', include_private=True)     # 관리자에게는 비공개 문서도 보인다.
             self.autocomplete.assert_awaited_once()
             suggest.reset_mock()
             self.autocomplete.reset_mock()
             await self.bot.tree._call(self.interaction(OTHER, MEMBER, name='설정', kind=4, options=options))
-            suggest.assert_called_once_with('나')
+            suggest.assert_called_once_with('나', include_private=False)
+
+    async def test_private_list_and_notification_commands_through_the_real_path(self):
+        for name in ('비공개목록', '알림채널', '알림해제'):
+            self.send.reset_mock()
+            await self.bot.tree._call(self.interaction(RESTRICTED, MEMBER, name=name))
+            self.assertEqual(self.send.await_args, mock.call('이 명령어를 사용할 권한이 없어요.', ephemeral=True), name)
+        # 다른 서버: 관리자가 아니면 비공개목록은 본인에게만 거절 메시지(규칙 때문이 아니라 명령 자체의 권한)
+        self.send.reset_mock()
+        await self.bot.tree._call(self.interaction(OTHER, MEMBER, name='비공개목록'))
+        self.assertEqual(self.send.await_args, mock.call('이 명령어를 사용할 권한이 없어요.', ephemeral=True))
+        self.defer.assert_not_awaited()
+        self.defer.reset_mock()
+        with mock.patch('cogs.lore.ensure_loaded', new=AsyncMock(return_value=True)), \
+                mock.patch('cogs.lore.send_paged', new=AsyncMock()) as shown:
+            await self.bot.tree._call(self.interaction(OTHER, ADMIN, name='비공개목록'))
+        self.defer.assert_awaited_once_with(ephemeral=True)
+        shown.assert_awaited_once()
+
+    async def test_setting_command_end_to_end_keeps_private_documents_private(self):
+        from tests.test_page_features import load
+        lore = load()
+        await lore.refresh()
+        self.bot.lore = lore
+        option = [{'name': '이름', 'type': 3, 'value': '미공개 설정'}]       # 한글 옵션 이름이 실제로 연결되는지
+        # 일반 멤버: 비공개 문서는 없는 것처럼 보인다(공개 응답, 이름·내용 없음)
+        await self.bot.tree._call(self.interaction(OTHER, MEMBER, name='설정', options=option))
+        self.defer.assert_awaited_once_with(ephemeral=False)
+        text = self.followup_send.await_args.args[0]
+        self.assertIn('찾지 못했어요', text)
+        self.assertNotIn('비밀 내용', str(self.followup_send.await_args))
+        # 관리자: 본인에게만 보이는 응답으로 내용을 보여준다.
+        self.defer.reset_mock()
+        self.followup_send.reset_mock()
+        await self.bot.tree._call(self.interaction(OTHER, ADMIN, name='설정', options=option))
+        self.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = self.followup_send.await_args.kwargs
+        self.assertTrue(kwargs['ephemeral'])
+        self.assertIn('비밀 내용', kwargs['embeds'][0].description)
+        kwargs['view'].stop()
+        # 같은 관리자가 공개 문서를 열면 공개 응답이고, 비공개 하위 문서는 선택창에 없다.
+        self.defer.reset_mock()
+        self.followup_send.reset_mock()
+        public = [{'name': '이름', 'type': 3, 'value': '성역의 경계'}]
+        await self.bot.tree._call(self.interaction(OTHER, ADMIN, name='설정', options=public))
+        self.defer.assert_awaited_once_with(ephemeral=False)
+        kwargs = self.followup_send.await_args.kwargs
+        select = next(c for c in kwargs['view'].children if isinstance(c, discord.ui.Select))
+        self.assertNotIn('🔒 비밀 지도', [o.label for o in select.options])
+        kwargs['view'].stop()
 
     async def test_denial_survives_a_failed_reply(self):
         with mock.patch.object(discord.InteractionResponse, 'send_message', new_callable=AsyncMock,

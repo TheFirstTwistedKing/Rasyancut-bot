@@ -16,16 +16,20 @@ class Search(commands.Cog):
         await interaction.response.defer()
         if not await ensure_loaded(interaction, self.bot.lore):
             return
-        results = self.bot.lore.search(keyword)
+        hits = self.bot.lore.search_hits(keyword)     # 비공개 문서는 누가 검색해도 나오지 않는다.
         shown = keyword[:50]
-        if not results:
+        if not hits:
             await interaction.followup.send(f"'{shown}'에 대한 결과가 없어요.")
             return
+        labels = {"title": "제목 일치", "alias": "별칭 일치", "initial": "초성 일치", "similar": "비슷한 이름"}
         blocks = []
-        for page, snippet, count in results:
-            label = f"{count}회" if count else "제목 일치"
-            blocks.append(f"**{page.label}** · {label}\n…{snippet}…")
-        embed = discord.Embed(title=f"검색: {shown}", description="\n\n".join(blocks), color=COLOR)
+        for hit in hits:
+            label = f"{hit.count}회" if hit.kind == "text" else labels[hit.kind] + (f" · 본문 {hit.count}회" if hit.count else "")
+            blocks.append(f"**{hit.page.label}** · {label}\n…{hit.snippet}…")
+        description = "\n\n".join(blocks)
+        if all(hit.kind == "similar" for hit in hits):
+            description = "정확히 맞는 결과가 없어서 비슷한 이름을 보여줘요.\n\n" + description
+        embed = discord.Embed(title=f"검색: {shown}", description=description, color=COLOR)
         embed.set_footer(text="자세히 보려면 /설정 이름")
         await interaction.followup.send(embed=embed)
 
